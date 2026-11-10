@@ -3,7 +3,8 @@
 主机仿真的**多核 IPC 音频通路**：三个进程复现「Android(GVM) → Linux(PVM) → DSP」
 的共享内存音频传输，核心是 **ALSA playback 的 `appl_ptr` / `hw_ptr` 闭环**。
 
-> 现状：**M1–M4 完成**，三进程端到端跑通，DSP 端已接入 `mini_dsp` 的算法库。
+> 现状：**M1–M6 完成**。三进程端到端跑通，DSP 接入 `mini_dsp` 算法库，
+> 具备统计面板、故障注入，以及可切换的仿真 / 真 ALSA 双后端。
 
 ## 链路
 
@@ -126,10 +127,12 @@ PVM_STAT t_ms=799 appl=33600 hw=30720 fill=2880 xruns=8 drops=1920 lat_ms=60.0 j
 
 ```
 multicore_ipc_sim/
-├── include/  mcshm_ring.h  mccmd.h  mcpcm.h  mcs16.h
-├── src/      mcshm_ring.c  mccmd.c   mcpcm.c  mcs16.c
+├── include/  mcshm_ring.h  mccmd.h  mcpcm.h  mcpcm_ops.h  mcs16.h
+├── src/      mcshm_ring.c  mccmd.c  mcpcm.c  mcpcm_ops.c  mcpcm_alsa.c  mcs16.c
 ├── apps/     pvm_router.c  gvm_app.c  dsp_engine.c
-├── tests/    ring_selftest.c  run_m2.sh  run_m3.sh  run_m4.sh
+├── tests/    ring_selftest.c  multichannel_selftest.c
+│             run_m2.sh  run_m3.sh  run_m4.sh  run_m5.sh  run_m6.sh
+├── scripts/  demo.sh
 └── docs/     architecture.md
 ```
 
