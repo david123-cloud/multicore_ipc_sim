@@ -176,7 +176,10 @@ static int engine_drain_one_period(struct dsp_engine *engine)
 
 int main(int argc, char **argv)
 {
-    const char *socket_path = (argc > 1) ? argv[1] : DEFAULT_SOCKET;
+    const char *socket_path = DEFAULT_SOCKET;
+    uint32_t requested_channels = 2u;
+    int socket_set = 0;
+    int argi;
     struct dsp_engine engine;
     struct mccmd_hw_params params;
     struct mccmd_header header;
@@ -191,6 +194,19 @@ int main(int argc, char **argv)
     memset(&engine, 0, sizeof(engine));
     engine.fd = -1;
 
+    for (argi = 1; argi < argc; ++argi) {
+        if (strcmp(argv[argi], "--channels") == 0 && argi + 1 < argc) {
+            requested_channels = (uint32_t)strtoul(argv[++argi], NULL, 10);
+        } else if (!socket_set) {
+            socket_path = argv[argi];
+            socket_set = 1;
+        }
+    }
+    if (requested_channels == 0u || requested_channels > 32u) {
+        fprintf(stderr, "dsp: channel count must be 1..32\n");
+        return 1;
+    }
+
     if ((size_t)snprintf(dsp_path, sizeof(dsp_path), "%s.dsp", socket_path) >= sizeof(dsp_path)) {
         fprintf(stderr, "dsp: socket path too long\n");
         return 1;
@@ -202,7 +218,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    params.channels = 2u;
+    params.channels = requested_channels;
     params.rate = 48000u;
     params.period_frames = 960u;
     params.period_count = 4u;

@@ -123,6 +123,11 @@ if(HAVE_MINIDSP)
              COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_m5.sh
                      $<TARGET_FILE:pvm_router> $<TARGET_FILE:gvm_app> $<TARGET_FILE:dsp_engine>)
     set_tests_properties(fault_injection PROPERTIES TIMEOUT 90)
+
+    add_test(NAME channel_parameterisation
+             COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_m7.sh
+                     $<TARGET_FILE:pvm_router> $<TARGET_FILE:gvm_app> $<TARGET_FILE:dsp_engine>)
+    set_tests_properties(channel_parameterisation PROPERTIES TIMEOUT 120)
 endif()
 
 if(ASOUND_LIBRARY)

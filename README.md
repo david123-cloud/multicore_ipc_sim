@@ -65,17 +65,18 @@ ctest --test-dir build --output-on-failure
 
 ## 实测结果
 
-Ubuntu 22.04 / gcc 11.4，`-Werror` + ASan/UBSan，**ctest 7/7 通过**：
+Ubuntu 22.04 / gcc 11.4，`-Werror` + ASan/UBSan，**ctest 8/8 通过**：
 
 | 测试 | 内容 | 耗时 |
 |---|---|---|
 | `ring_selftest` | 47 项，含双进程 fork | 0.03 s |
 | `ipc_single_hop` | 两进程、背压、资源回收 | 1.99 s |
-| `pcm_state_machine` | 状态机 + 正常播放 + 停播 xrun | 4.14 s |
-| `multichannel_32` | 32 声道、每声道独立状态、33 声道拒绝 | 0.02 s |
-| `three_process_pipeline` | 三进程、两跳、算法链路 + FFT | 2.22 s |
-| `fault_injection` | 统计面板 + 抖动 + 丢帧 + 停播注入 | 1.56 s |
-| `alsa_backend` | **真 libasound 播放，实时性校验** | 1.05 s |
+| `pcm_state_machine` | 状态机 + 正常播放 + 停播 xrun | 4.10 s |
+| `multichannel_32` | 32 声道、每声道独立状态、33 声道拒绝 | 0.01 s |
+| `three_process_pipeline` | 三进程、两跳、算法链路 + FFT | 2.18 s |
+| `fault_injection` | 统计面板 + 抖动 + 丢帧 + 停播注入 | 1.54 s |
+| `channel_parameterisation` | 4/8 声道端到端、几何不匹配被拒 | 2.90 s |
+| `alsa_backend` | **真 libasound 播放，实时性校验** | 1.06 s |
 
 三进程实测（2.000 s 音频 / 1.920 s 墙钟）：
 
@@ -167,13 +168,35 @@ GVM_STATS frames=48000 periods=50 full_events=0 xruns=0 elapsed_ms=928.4
 928 ms 墙钟对应 1.000 s 音频（差值是 drain 把尾部留在设备缓冲里），
 证明 ALSA 设备真的在反向限速，而不是像 `null` 插件那样 3 ms 吞完。
 
+## 声道数是参数
+
+整条链路的声道数由应用指定，最大 32：
+
+```bash
+./build/gvm_app /tmp/mc.sock 100 --channels 8
+./build/dsp_engine /tmp/mc.sock --channels 8
+```
+
+桥接会校验两端申请的几何参数（声道、period 帧数、period 数、样本宽度），
+不一致直接拒绝，避免把交错数据按错误的 stride 解释。实测 4 声道与 8 声道：
+
+```
+=== 8 channels ===
+  [ok]   dsp received 38400 frames
+  [ok]   dsp saw 8 channels
+  rms in 0.103630 out 0.102644 (ratio 0.9905)
+  [ok]   bridge refused a 2ch app with a 4ch dsp
+```
+
 ## 已知限制（下一步要解决）
 
-- **32 声道已打通**：`mini_dsp` 的 biquad 现在每声道独立历史、`ns` 上限提到 32、
+- **32 声道已打通**：`mini_dsp` 的 biquad 每声道独立历史、`ns` 上限 32、
   `fft_plan` 支持任意 2 的幂（960 帧 period 用 1024 点补零分析，分辨率 46.875 Hz）；
-  33 声道会被模块明确拒绝。应用侧目前仍固定用 2 声道，需要时可参数化。
+  应用侧可用 `--channels` 指定，33 声道会被明确拒绝。
 - **DSP 时钟**：目前由 PVM 的 period 通知驱动，尚未实现 DSP 侧独立时钟与漂移补偿
 - 桥接在 B 满时丢帧（计数），没有做反压到 A
+- **两跳是两条 ring**：仿真里两段内存是分开的，每跳一次拷贝；真实系统中
+  跨 VM / 跨核是否共用同一块缓冲，取决于是否有 hypervisor 共享内存窗口
 
 ## 实现中真实踩到的坑
 

@@ -33,6 +33,7 @@ struct pvm_end {
     struct mcshm_ring ring;
     uint32_t seq;
     uint32_t period_frames;
+    uint32_t period_count;
     uint32_t channels;
     uint32_t sample_bytes;
     uint64_t frames;
@@ -119,6 +120,7 @@ static int end_announce(struct pvm_state *state, struct pvm_end *end, uint32_t s
 
     end->have_ring = 1;
     end->period_frames = cfg->period_frames;
+    end->period_count = cfg->period_count;
     end->channels = cfg->channels;
     end->sample_bytes = cfg->sample_bytes;
 
@@ -156,6 +158,24 @@ static int end_handle(struct pvm_state *state, struct pvm_end *end,
         cfg.period_frames = params->period_frames;
         cfg.period_count = params->period_count;
         cfg.sample_bytes = params->sample_bytes;
+
+        /* Both ends of the bridge must describe the same stream: a different
+         * channel count would silently reinterpret the samples. */
+        if (end != &state->gvm && state->gvm.have_ring &&
+            (cfg.channels != state->gvm.channels ||
+             cfg.period_frames != state->gvm.period_frames ||
+             cfg.period_count != state->gvm.period_count ||
+             cfg.sample_bytes != state->gvm.sample_bytes)) {
+            struct mccmd_ack ack;
+
+            memset(&ack, 0, sizeof(ack));
+            ack.status = MCCMD_ERR_PROTOCOL;
+            printf("PVM: %s geometry mismatch (%uch vs %uch), refused\n", end->label,
+                   (unsigned)cfg.channels, (unsigned)state->gvm.channels);
+            fflush(stdout);
+            return mccmd_send(end->fd, MCCMD_MSG_ACK, header->seq, &ack, (uint32_t)sizeof(ack));
+        }
+
         return end_announce(state, end, header->seq, &cfg);
     }
 

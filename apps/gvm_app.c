@@ -14,6 +14,7 @@
 #define DEFAULT_PERIODS 100u
 
 #define CHANNELS 2u
+#define MAX_CHANNELS 32u
 #define RATE 48000u
 #define PERIOD_FRAMES 960u
 #define PERIOD_COUNT 4u
@@ -54,6 +55,7 @@ int main(int argc, char **argv)
     const char *device_name = DEFAULT_DEVICE;
     const char *backend = "shm";
     uint32_t periods = DEFAULT_PERIODS;
+    uint32_t channels = CHANNELS;
     int stall = 0;
     int state_checks = 0;
     int socket_set = 0;
@@ -78,6 +80,8 @@ int main(int argc, char **argv)
             backend = argv[++argi];
         } else if (strcmp(argv[argi], "--device") == 0 && argi + 1 < argc) {
             device_name = argv[++argi];
+        } else if (strcmp(argv[argi], "--channels") == 0 && argi + 1 < argc) {
+            channels = (uint32_t)strtoul(argv[++argi], NULL, 10);
         } else if (!socket_set && strspn(argv[argi], "0123456789") != strlen(argv[argi])) {
             socket_path = argv[argi];
             socket_set = 1;
@@ -89,8 +93,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "gvm: period count must be positive\n");
         return 1;
     }
+    if (channels == 0u || channels > MAX_CHANNELS) {
+        fprintf(stderr, "gvm: channel count must be 1..%u\n", (unsigned)MAX_CHANNELS);
+        return 1;
+    }
 
-    buffer = (int16_t *)malloc((size_t)PERIOD_FRAMES * CHANNELS * sizeof(int16_t));
+    buffer = (int16_t *)malloc((size_t)PERIOD_FRAMES * channels * sizeof(int16_t));
     if (buffer == NULL) {
         fprintf(stderr, "gvm: out of memory\n");
         return 1;
@@ -113,11 +121,11 @@ int main(int argc, char **argv)
         free(buffer);
         return 1;
     }
-    printf("GVM: backend=%s device=%s state=%s\n", dev.ops->name,
-           (strcmp(backend, "alsa") == 0) ? device_name : socket_path,
+    printf("GVM: backend=%s device=%s channels=%u state=%s\n", dev.ops->name,
+           (strcmp(backend, "alsa") == 0) ? device_name : socket_path, (unsigned)channels,
            mcpcm_state_name(dev.state));
 
-    config.channels = CHANNELS;
+    config.channels = channels;
     config.rate = RATE;
     config.period_frames = PERIOD_FRAMES;
     config.period_count = PERIOD_COUNT;
@@ -168,13 +176,19 @@ int main(int argc, char **argv)
 
         for (frame = 0u; frame < PERIOD_FRAMES; ++frame) {
             float value = (float)(0.25 * sin(phase));
+            uint32_t channel;
 
             phase += increment;
             if (phase > 2.0 * PI) {
                 phase -= 2.0 * PI;
             }
-            buffer[(size_t)frame * CHANNELS] = (int16_t)(value * 32767.0f);
-            buffer[(size_t)frame * CHANNELS + 1u] = (int16_t)(value * 16384.0f);
+            /* Channel 0 at full amplitude, the rest slightly quieter, so a
+             * per-channel mix-up would be visible in the DSP statistics. */
+            for (channel = 0u; channel < channels; ++channel) {
+                float scale = (channel == 0u) ? 32767.0f : 16384.0f;
+
+                buffer[(size_t)frame * channels + channel] = (int16_t)(value * scale);
+            }
         }
 
         /* A deliberately slow producer: with the simulated backend this shows
