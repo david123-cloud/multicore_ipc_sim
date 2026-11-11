@@ -61,7 +61,7 @@ static void engine_free(struct dsp_engine *engine)
     }
 }
 
-static int engine_setup_chain(struct dsp_engine *engine)
+static int engine_setup_chain(struct dsp_engine *engine, int with_agc)
 {
     struct biquad_config filter;
     struct ns_config gate;
@@ -87,9 +87,13 @@ static int engine_setup_chain(struct dsp_engine *engine)
         return -1;
     }
 
-    module = create_agc_module();
-    if (module == NULL || pipeline_add(&engine->pipe, module) != DSP_OK) {
-        return -1;
+    /* The AGC changes the level by design, so it stays opt-in: the other
+     * stages are expected to preserve it. */
+    if (with_agc) {
+        module = create_agc_module();
+        if (module == NULL || pipeline_add(&engine->pipe, module) != DSP_OK) {
+            return -1;
+        }
     }
     return 0;
 }
@@ -244,6 +248,7 @@ int main(int argc, char **argv)
     const char *socket_path = DEFAULT_SOCKET;
     uint32_t requested_channels = 2u;
     int direct_mode = 0;
+    int with_agc = 0;
     int socket_set = 0;
     int argi;
     struct dsp_engine engine;
@@ -265,6 +270,8 @@ int main(int argc, char **argv)
             requested_channels = (uint32_t)strtoul(argv[++argi], NULL, 10);
         } else if (strcmp(argv[argi], "--topology") == 0 && argi + 1 < argc) {
             direct_mode = (strcmp(argv[++argi], "direct") == 0);
+        } else if (strcmp(argv[argi], "--agc") == 0) {
+            with_agc = 1;
         } else if (!socket_set) {
             socket_path = argv[argi];
             socket_set = 1;
@@ -359,7 +366,7 @@ int main(int argc, char **argv)
         engine_free(&engine);
         return 1;
     }
-    if (engine_setup_chain(&engine) != 0) {
+    if (engine_setup_chain(&engine, with_agc) != 0) {
         fprintf(stderr, "dsp: pipeline setup failed\n");
         engine_free(&engine);
         return 1;
