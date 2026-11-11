@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "agc.h"
 #include "biquad.h"
@@ -174,10 +175,75 @@ static int engine_drain_one_period(struct dsp_engine *engine)
     return 0;
 }
 
+/*
+ * Direct topology: the DSP is the device.  Its own timer is the crystal, and
+ * every successful read is a DMA completion that must be reported upstream so
+ * the application can refill the ring.
+ */
+static int engine_run_direct(struct dsp_engine *engine)
+{
+    struct timespec deadline;
+    uint64_t period_ns = (uint64_t)engine->period_frames * 1000000000ull / 48000ull;
+    uint64_t periods_seen = 0u;
+    int running = 1;
+
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    while (running) {
+        struct mccmd_header header;
+        unsigned char payload[MCCMD_MAX_PAYLOAD];
+        struct mccmd_progress progress;
+        uint64_t got;
+
+        (void)clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL);
+        deadline.tv_nsec += (long)(period_ns % 1000000000ull);
+        deadline.tv_sec += (time_t)(period_ns / 1000000000ull);
+        while (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_nsec -= 1000000000L;
+            deadline.tv_sec += 1;
+        }
+
+        got = mcshm_ring_read(&engine->ring, engine->s16, engine->period_frames);
+        periods_seen += 1u;
+        if (got > 0u) {
+            if (engine_process_period(engine, (uint32_t)got) != 0) {
+                return -1;
+            }
+            engine->frames += got;
+            engine->periods += 1u;
+        } else {
+            engine->empty_events += 1u;
+        }
+
+        progress.hw_ptr = engine->frames;
+        progress.period_index = periods_seen;
+        progress.underrun = (got == 0u) ? 1u : 0u;
+        progress.reserved = 0u;
+        if (mccmd_send(engine->fd, MCCMD_MSG_CONSUMED, 0u, &progress,
+                       (uint32_t)sizeof(progress)) != MCCMD_OK) {
+            /* The host is gone; stop ticking but still finish the ring so no
+             * frame is silently left behind. */
+            running = 0;
+        } else if (mccmd_recv(engine->fd, &header, payload, (uint32_t)sizeof(payload), 0) == 1 &&
+                   (header.type == MCCMD_MSG_DRAIN || header.type == MCCMD_MSG_SHUTDOWN)) {
+            running = 0;
+        }
+
+        if (!running) {
+            while (mcshm_ring_avail_read(&engine->ring) > 0u) {
+                if (engine_drain_one_period(engine) != 0) {
+                    break;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *socket_path = DEFAULT_SOCKET;
     uint32_t requested_channels = 2u;
+    int direct_mode = 0;
     int socket_set = 0;
     int argi;
     struct dsp_engine engine;
@@ -197,6 +263,8 @@ int main(int argc, char **argv)
     for (argi = 1; argi < argc; ++argi) {
         if (strcmp(argv[argi], "--channels") == 0 && argi + 1 < argc) {
             requested_channels = (uint32_t)strtoul(argv[++argi], NULL, 10);
+        } else if (strcmp(argv[argi], "--topology") == 0 && argi + 1 < argc) {
+            direct_mode = (strcmp(argv[++argi], "direct") == 0);
         } else if (!socket_set) {
             socket_path = argv[argi];
             socket_set = 1;
@@ -224,23 +292,42 @@ int main(int argc, char **argv)
     params.period_count = 4u;
     params.sample_bytes = 2u;
 
-    if (mccmd_send(engine.fd, MCCMD_MSG_SET_HW_PARAMS, 0u, &params, (uint32_t)sizeof(params)) !=
-        MCCMD_OK) {
-        fprintf(stderr, "dsp: cannot send hw_params\n");
-        engine_free(&engine);
-        return 1;
-    }
-    result = mccmd_recv(engine.fd, &header, payload, (uint32_t)sizeof(payload), 2000);
-    if (result != 1 || header.type != MCCMD_MSG_ACK || header.length != sizeof(ack)) {
-        fprintf(stderr, "dsp: no hw_params ack\n");
-        engine_free(&engine);
-        return 1;
-    }
-    memcpy(&ack, payload, sizeof(ack));
-    if (ack.status != MCCMD_OK) {
-        fprintf(stderr, "dsp: hw_params refused (%d)\n", ack.status);
-        engine_free(&engine);
-        return 1;
+    /*
+     * In the direct topology the DSP attaches the application's segment, which
+     * only exists after the application has configured the PCM.  Retry briefly
+     * instead of failing when the DSP happens to start first.
+     */
+    {
+        int attempt;
+        int accepted = 0;
+
+        for (attempt = 0; attempt < 100 && !accepted; ++attempt) {
+            struct timespec pause = {0, 20000000};
+
+            if (mccmd_send(engine.fd, MCCMD_MSG_SET_HW_PARAMS, 0u, &params,
+                           (uint32_t)sizeof(params)) != MCCMD_OK) {
+                fprintf(stderr, "dsp: cannot send hw_params\n");
+                engine_free(&engine);
+                return 1;
+            }
+            result = mccmd_recv(engine.fd, &header, payload, (uint32_t)sizeof(payload), 500);
+            if (result != 1 || header.type != MCCMD_MSG_ACK || header.length != sizeof(ack)) {
+                fprintf(stderr, "dsp: no hw_params ack\n");
+                engine_free(&engine);
+                return 1;
+            }
+            memcpy(&ack, payload, sizeof(ack));
+            if (ack.status == MCCMD_OK) {
+                accepted = 1;
+            } else {
+                nanosleep(&pause, NULL);
+            }
+        }
+        if (!accepted) {
+            fprintf(stderr, "dsp: hw_params refused (%d)\n", ack.status);
+            engine_free(&engine);
+            return 1;
+        }
     }
 
     if (mcshm_ring_open(&engine.ring, ack.shm_name, &actual) != MCSHM_OK) {
@@ -282,6 +369,11 @@ int main(int argc, char **argv)
            (unsigned)engine.channels, (unsigned)engine.period_frames,
            (unsigned)engine.pipe.module_count);
     fflush(stdout);
+
+    if (direct_mode) {
+        (void)engine_run_direct(&engine);
+        running = 0;
+    }
 
     while (running) {
         result = mccmd_recv(engine.fd, &header, payload, (uint32_t)sizeof(payload), 500);

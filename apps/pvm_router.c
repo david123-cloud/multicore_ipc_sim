@@ -48,6 +48,7 @@ struct pvm_state {
     struct pvm_end gvm;
     struct pvm_end dsp;
     int running;
+    int direct; /* one shared segment, the DSP consumes it directly */
 
     /* Observation: a CSV row every stats_every periods. */
     int stats_on;
@@ -158,6 +159,43 @@ static int end_handle(struct pvm_state *state, struct pvm_end *end,
         cfg.period_frames = params->period_frames;
         cfg.period_count = params->period_count;
         cfg.sample_bytes = params->sample_bytes;
+
+        /*
+         * Direct topology: the DSP consumes the application's own segment.
+         * The host attaches it a second time only to describe and validate it;
+         * no audio byte is copied here.
+         */
+        if (state->direct && end == &state->dsp) {
+            struct mccmd_ack ack;
+
+            memset(&ack, 0, sizeof(ack));
+            if (!state->gvm.have_ring) {
+                /* The application has not configured the PCM yet; the DSP
+                 * retries, so report it as a retryable refusal. */
+                ack.status = MCCMD_ERR_PROTOCOL;
+                return mccmd_send(end->fd, MCCMD_MSG_ACK, header->seq, &ack,
+                                  (uint32_t)sizeof(ack));
+            }
+            if (mcshm_ring_open(&end->ring, state->gvm.shm_name, NULL) != MCSHM_OK) {
+                ack.status = MCSHM_ERR_IO;
+                return mccmd_send(end->fd, MCCMD_MSG_ACK, header->seq, &ack,
+                                  (uint32_t)sizeof(ack));
+            }
+            end->have_ring = 1;
+            end->period_frames = state->gvm.period_frames;
+            end->period_count = state->gvm.period_count;
+            end->channels = state->gvm.channels;
+            end->sample_bytes = state->gvm.sample_bytes;
+
+            ack.status = MCCMD_OK;
+            ack.ring_frames = (uint32_t)end->ring.ring_frames;
+            ack.stride = end->ring.stride;
+            (void)snprintf(ack.shm_name, sizeof(ack.shm_name), "%s", state->gvm.shm_name);
+            printf("PVM: dsp attached the same segment %s (direct, no copy)\n",
+                   state->gvm.shm_name);
+            fflush(stdout);
+            return mccmd_send(end->fd, MCCMD_MSG_ACK, header->seq, &ack, (uint32_t)sizeof(ack));
+        }
 
         /* Both ends of the bridge must describe the same stream: a different
          * channel count would silently reinterpret the samples. */
@@ -303,7 +341,16 @@ int main(int argc, char **argv)
     state.rng = 0x9E3779B97F4A7C15ull;
 
     for (argi = 1; argi < argc; ++argi) {
-        if (strcmp(argv[argi], "--stats") == 0) {
+        if (strcmp(argv[argi], "--topology") == 0 && argi + 1 < argc) {
+            const char *mode = argv[++argi];
+
+            if (strcmp(mode, "direct") == 0) {
+                state.direct = 1;
+            } else if (strcmp(mode, "bridge") != 0) {
+                fprintf(stderr, "pvm: unknown topology %s (bridge|direct)\n", mode);
+                return 1;
+            }
+        } else if (strcmp(argv[argi], "--stats") == 0) {
             state.stats_on = 1;
         } else if (strcmp(argv[argi], "--jitter-us") == 0 && argi + 1 < argc) {
             state.jitter_us = (int64_t)strtol(argv[++argi], NULL, 10);
@@ -378,6 +425,73 @@ int main(int argc, char **argv)
                 printf("PVM: dsp connected\n");
                 fflush(stdout);
             }
+        }
+
+        /*
+         * Direct topology: the host does not touch the audio path at all.  It
+         * relays the application's control messages and forwards the DSP's
+         * DMA-complete notifications back as PERIOD / XRUN.
+         */
+        if (state.direct) {
+            result = mccmd_recv(state.gvm.fd, &header, payload, (uint32_t)sizeof(payload), 50);
+            if (result == 1) {
+                if (header.type == MCCMD_MSG_DRAIN) {
+                    struct mccmd_ack ack;
+
+                    if (state.dsp.fd >= 0) {
+                        (void)mccmd_send(state.dsp.fd, MCCMD_MSG_DRAIN, state.dsp.seq++, NULL, 0u);
+                    }
+                    state.running = 0;
+                    memset(&ack, 0, sizeof(ack));
+                    ack.status = MCCMD_OK;
+                    (void)mccmd_send(state.gvm.fd, MCCMD_MSG_ACK, header.seq, &ack,
+                                     (uint32_t)sizeof(ack));
+                } else if (end_handle(&state, &state.gvm, &header, payload) == MCCMD_ERR_CLOSED) {
+                    if (state.dsp.fd >= 0) {
+                        (void)mccmd_send(state.dsp.fd, MCCMD_MSG_SHUTDOWN, state.dsp.seq++, NULL, 0u);
+                    }
+                    running = 0;
+                }
+            } else if (result < 0) {
+                running = 0;
+            }
+
+            if (state.dsp.fd >= 0) {
+                int dsp_result =
+                    mccmd_recv(state.dsp.fd, &header, payload, (uint32_t)sizeof(payload), 0);
+
+                if (dsp_result == 1 &&
+                    header.type == MCCMD_MSG_CONSUMED &&
+                    header.length == sizeof(struct mccmd_progress)) {
+                    struct mccmd_progress progress;
+
+                    memcpy(&progress, payload, sizeof(progress));
+                    state.gvm.frames = progress.hw_ptr;
+                    if (progress.underrun != 0u) {
+                        struct mccmd_xrun notice;
+
+                        state.gvm.underruns += 1u;
+                        state.gvm.empty_events += 1u;
+                        notice.hw_ptr = progress.hw_ptr;
+                        notice.period_index = progress.period_index;
+                        (void)mccmd_send(state.gvm.fd, MCCMD_MSG_XRUN, state.gvm.seq++, &notice,
+                                         (uint32_t)sizeof(notice));
+                    } else {
+                        struct mccmd_period notice;
+
+                        state.gvm.periods += 1u;
+                        notice.hw_ptr = progress.hw_ptr;
+                        notice.period_index = progress.period_index;
+                        (void)mccmd_send(state.gvm.fd, MCCMD_MSG_PERIOD, state.gvm.seq++, &notice,
+                                         (uint32_t)sizeof(notice));
+                    }
+                } else if (dsp_result == 1) {
+                    (void)end_handle(&state, &state.dsp, &header, payload);
+                } else if (dsp_result < 0) {
+                    state.dsp.fd = -1;
+                }
+            }
+            continue;
         }
 
         if (state.running) {

@@ -128,6 +128,11 @@ if(HAVE_MINIDSP)
              COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_m7.sh
                      $<TARGET_FILE:pvm_router> $<TARGET_FILE:gvm_app> $<TARGET_FILE:dsp_engine>)
     set_tests_properties(channel_parameterisation PROPERTIES TIMEOUT 120)
+
+    add_test(NAME direct_topology
+             COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_m8.sh
+                     $<TARGET_FILE:pvm_router> $<TARGET_FILE:gvm_app> $<TARGET_FILE:dsp_engine>)
+    set_tests_properties(direct_topology PROPERTIES TIMEOUT 90)
 endif()
 
 if(ASOUND_LIBRARY)

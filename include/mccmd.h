@@ -39,8 +39,9 @@ enum mccmd_type {
     MCCMD_MSG_STATS = 6,         /* PVM -> GVM: counters */
     MCCMD_MSG_SHUTDOWN = 7,      /* GVM -> PVM: exit */
     MCCMD_MSG_PREPARE = 8,       /* GVM -> PVM: reset the ring, device stopped */
-    MCCMD_MSG_PERIOD = 9,        /* PVM -> GVM: period elapsed, hw_ptr advanced */
-    MCCMD_MSG_XRUN = 10          /* PVM -> GVM: underrun detected */
+    MCCMD_MSG_PERIOD = 9,        /* device -> app: period elapsed, hw_ptr advanced */
+    MCCMD_MSG_XRUN = 10,         /* device -> app: underrun detected */
+    MCCMD_MSG_CONSUMED = 11      /* DSP -> PVM: DMA done, hw_ptr advanced (direct topology) */
 };
 
 struct mccmd_header {
@@ -86,6 +87,18 @@ struct mccmd_period {
 struct mccmd_xrun {
     uint64_t hw_ptr;
     uint64_t period_index;
+};
+
+/*
+ * Direct topology only: the DSP is the consumer, so it owns the device clock
+ * and the DMA-complete interrupt.  This is that interrupt, travelling upstream
+ * to the host, which relays it to the application as a PERIOD or XRUN.
+ */
+struct mccmd_progress {
+    uint64_t hw_ptr;       /* frames the DSP has consumed */
+    uint64_t period_index; /* periods the DSP has ticked */
+    uint32_t underrun;     /* 1 when the tick found no data */
+    uint32_t reserved;
 };
 
 /* Listener socket bound to `path`; a stale socket file is replaced. */

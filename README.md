@@ -65,7 +65,7 @@ ctest --test-dir build --output-on-failure
 
 ## 实测结果
 
-Ubuntu 22.04 / gcc 11.4，`-Werror` + ASan/UBSan，**ctest 8/8 通过**：
+Ubuntu 22.04 / gcc 11.4，`-Werror` + ASan/UBSan，**ctest 9/9 通过**：
 
 | 测试 | 内容 | 耗时 |
 |---|---|---|
@@ -76,7 +76,8 @@ Ubuntu 22.04 / gcc 11.4，`-Werror` + ASan/UBSan，**ctest 8/8 通过**：
 | `three_process_pipeline` | 三进程、两跳、算法链路 + FFT | 2.18 s |
 | `fault_injection` | 统计面板 + 抖动 + 丢帧 + 停播注入 | 1.54 s |
 | `channel_parameterisation` | 4/8 声道端到端、几何不匹配被拒 | 2.90 s |
-| `alsa_backend` | **真 libasound 播放，实时性校验** | 1.06 s |
+| `direct_topology` | **一块 ring、DSP 自有时钟、零拷贝** | 2.15 s |
+| `alsa_backend` | **真 libasound 播放，实时性校验** | 1.07 s |
 
 三进程实测（2.000 s 音频 / 1.920 s 墙钟）：
 
@@ -90,6 +91,37 @@ DSP: rms in 0.139738 out 0.139541
 ```
 
 三端帧数完全一致（96000），桥接零丢帧，增益 0.9986 与高通在 440 Hz 处 |H|≈1 吻合。
+
+## 两种拓扑
+
+同一套代码支持两种数据通路，切换只改一个开关：
+
+| | `--topology bridge`（默认） | `--topology direct` |
+|---|---|---|
+| 数据段 | 两条（应用→宿主、宿主→DSP） | **一条**，三方映射同一段 |
+| 拷贝次数 | 每跳一次 | **零拷贝** |
+| PVM 角色 | 数据搬运 + 设备时钟 | **纯控制面**，一个字节都不碰 |
+| 谁是设备 | PVM 的消费推进 `hw_ptr` | **DSP 的消费推进 `hw_ptr`** |
+| 时钟与中断 | PVM 定时，向两侧发通知 | **DSP 用自己的时钟，向上游报 DMA 完成** |
+| 适用场景 | 跨 VM / 跨核、内存域不同 | 单 SoC + hypervisor 共享窗口 |
+
+```bash
+./build/pvm_router /tmp/mc.sock --topology direct &
+./build/dsp_engine /tmp/mc.sock --topology direct &
+./build/gvm_app /tmp/mc.sock 100
+```
+
+direct 模式的实测（应用 2.000 s 音频）：
+
+```
+PVM: gvm end created /mcshm_pvm_gvm (2ch, 960 frames/period x 4)
+PVM: dsp attached the same segment /mcshm_pvm_gvm (direct, no copy)
+DSP_STATS frames=96000 periods=100 empty=0 channels=2
+GVM_STATS frames=96000 periods=100 xruns=0 elapsed_ms=1906.7
+```
+
+DSP 消费了全部 96000 帧、**没有第二条数据段**，而且 2.0 s 音频耗时 1.9 s——
+说明是 DSP 的模拟晶振在给写入端限速，不是 PVM。
 
 ## 观测与故障注入（模拟设备侧）
 
